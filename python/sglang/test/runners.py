@@ -428,6 +428,11 @@ class HFRunner:
         else:
             token_ids_input_logprobs = token_ids_output_logprobs = None
 
+        # Track PeftModel wrapper to properly manage LoRA adapters across prompts.
+        # PeftModel.from_pretrained() modifies base_model in place, so we must use
+        # disable_adapter_layers() for base model inference after any LoRA is loaded.
+        peft_model = None
+
         for i, p in enumerate(prompts):
             if isinstance(p, str):
                 input_ids = tokenizer.encode(p, return_tensors="pt").to(get_device())
@@ -437,14 +442,39 @@ class HFRunner:
             if lora_paths is not None and lora_paths[i] is not None:
                 from peft import PeftModel
 
-                model = PeftModel.from_pretrained(
-                    base_model,
-                    lora_paths[i],
-                    torch_dtype=torch_dtype,
-                    is_trainable=False,
-                )
+                adapter_name = lora_paths[i].replace("/", "_")
+                if peft_model is not None:
+                    # Load new adapter into existing PeftModel if not already loaded
+                    if adapter_name not in peft_model.peft_config:
+                        peft_model.load_adapter(
+                            lora_paths[i],
+                            adapter_name=adapter_name,
+                            is_trainable=False,
+                        )
+                    peft_model.set_adapter(adapter_name)
+                    peft_model.enable_adapter_layers()
+                    model = peft_model
+                else:
+                    peft_model = PeftModel.from_pretrained(
+                        base_model,
+                        lora_paths[i],
+                        adapter_name=adapter_name,
+                        torch_dtype=torch_dtype,
+                        is_trainable=False,
+                    )
+                    # Ensure adapter is active after creation
+                    peft_model.set_adapter(adapter_name)
+                    peft_model.enable_adapter_layers()
+                    model = peft_model
             else:
-                model = base_model
+                # For base model inference, disable adapters if PeftModel exists.
+                # We must use peft_model with disabled adapters because base_model
+                # was modified in-place when PeftModel was created.
+                if peft_model is not None:
+                    peft_model.disable_adapter_layers()
+                    model = peft_model
+                else:
+                    model = base_model
 
             if patch_model_do_sample_false:
                 model.generation_config.do_sample = False
@@ -501,10 +531,6 @@ class HFRunner:
                         get_token_ids_logprobs(input_logits, token_ids_logprob).tolist()
                     )
                 del input_logits
-
-            if lora_paths is not None and lora_paths[i] is not None:
-                # Unload the LoRA adapter if it is used
-                model.unload()
 
         return ModelOutput(
             output_strs=output_strs,
