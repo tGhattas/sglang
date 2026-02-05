@@ -467,12 +467,11 @@ class HFRunner:
                     peft_model.enable_adapter_layers()
                     model = peft_model
             else:
-                # For base model inference, disable adapters if PeftModel exists.
-                # We must use peft_model with disabled adapters because base_model
-                # was modified in-place when PeftModel was created.
+                # For base model inference, use get_base_model() to get the original
+                # uncontaminated model. disable_adapter_layers() is insufficient as it
+                # doesn't restore modules_to_save to their original weights.
                 if peft_model is not None:
-                    peft_model.disable_adapter_layers()
-                    model = peft_model
+                    model = peft_model.get_base_model()
                 else:
                     model = base_model
 
