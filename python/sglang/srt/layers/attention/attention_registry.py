@@ -192,6 +192,7 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
             GDNAttnBackend,
             HybridLinearAttnBackend,
             KimiLinearAttnBackend,
+            Mamba1AttnBackend,
             Mamba2AttnBackend,
         )
         from sglang.srt.utils import is_blackwell, is_npu
@@ -209,13 +210,15 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
                 ), "ascend backend is the only supported backend on NPU for hybrid GDN models, use --attention-backend ascend to specify the backend."
             logger.info(f"Using hybrid linear attention backend for hybrid GDN models.")
             linear_attn_backend = GDNAttnBackend(runner)
+        elif runner.mamba1_config is not None:
+            linear_attn_backend = Mamba1AttnBackend(runner)
         elif runner.mamba2_config is not None:
             linear_attn_backend = Mamba2AttnBackend(runner)
         elif runner.kimi_linear_config is not None:
             linear_attn_backend = KimiLinearAttnBackend(runner)
         else:
             raise ValueError(
-                "Expected hybrid GDN or NemotronH models, but got unknown model."
+                "Expected hybrid GDN, Mamba1, or Mamba2 models, but got unknown model."
             )
         full_attn_layers = cfg.full_attention_layer_ids
         return HybridLinearAttnBackend(

@@ -325,8 +325,11 @@ class MambaPool:
         assert isinstance(self.mamba_cache, self.SpeculativeState)
         return self.mamba_cache
 
-    def mamba2_layer_cache(self, layer_id: int):
+    def mamba_layer_cache(self, layer_id: int):
         return self.mamba_cache.at_layer_idx(layer_id)
+
+    def mamba2_layer_cache(self, layer_id: int):
+        return self.mamba_layer_cache(layer_id)
 
     def available_size(self):
         return len(self.free_slots)
@@ -552,9 +555,12 @@ class HybridReqToTokenPool(ReqToTokenPool):
     def get_mamba_indices(self, req_indices: torch.Tensor) -> torch.Tensor:
         return self.req_index_to_mamba_index_mapping[req_indices]
 
-    def mamba2_layer_cache(self, layer_id: int):
+    def mamba_layer_cache(self, layer_id: int):
         assert layer_id in self.mamba_map
-        return self.mamba_pool.mamba2_layer_cache(self.mamba_map[layer_id])
+        return self.mamba_pool.mamba_layer_cache(self.mamba_map[layer_id])
+
+    def mamba2_layer_cache(self, layer_id: int):
+        return self.mamba_layer_cache(layer_id)
 
     def get_speculative_mamba2_params_all_layers(self) -> MambaPool.SpeculativeState:
         return self.mamba_pool.get_speculative_mamba2_params_all_layers()

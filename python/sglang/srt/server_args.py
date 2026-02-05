@@ -1537,6 +1537,11 @@ class ServerArgs:
                 "NemotronHForCausalLM does not support triton attention backend,"
                 "as the first layer might not be an attention layer"
             )
+        elif model_arch in ["JambaForCausalLM", "Jamba2ForCausalLM"]:
+            self._handle_mamba_radix_cache(
+                model_arch=model_arch,
+                support_mamba_cache_extra_buffer=False,
+            )
         elif model_arch in [
             "Qwen3MoeForCausalLM",
             "Qwen3VLMoeForConditionalGeneration",

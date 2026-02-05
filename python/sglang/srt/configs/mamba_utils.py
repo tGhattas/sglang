@@ -10,7 +10,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Common config utils for mamba2 - NemotronH, FalconH1, Qwen3Next, LFM2, etc."""
+"""Common config utils for mamba1/mamba2 - NemotronH, FalconH1, Jamba, etc."""
 
 from abc import ABC
 from dataclasses import dataclass, field
@@ -125,6 +125,46 @@ class Mamba2StateShape:
 @dataclass(kw_only=True, frozen=True)
 class Mamba2CacheParams(BaseLinearStateParams):
     shape: Mamba2StateShape
+
+
+@dataclass(kw_only=True, frozen=True)
+class Mamba1StateShape:
+    conv: list[tuple[int, int]]
+    temporal: tuple[int, int, int]
+
+    intermediate_size: int
+    ssm_state_size: int
+    conv_kernel: int
+
+    @staticmethod
+    def create(
+        *,
+        tp_world_size: int,
+        intermediate_size: int,
+        state_size: int,
+        conv_kernel: int,
+    ) -> "Mamba1StateShape":
+        conv_state_shape = (
+            divide(intermediate_size, tp_world_size),
+            conv_kernel - 1,
+        )
+        temporal_state_shape = (
+            1,
+            divide(intermediate_size, tp_world_size),
+            state_size,
+        )
+        return Mamba1StateShape(
+            conv=[conv_state_shape],
+            temporal=temporal_state_shape,
+            intermediate_size=intermediate_size,
+            ssm_state_size=state_size,
+            conv_kernel=conv_kernel,
+        )
+
+
+@dataclass(kw_only=True, frozen=True)
+class Mamba1CacheParams(BaseLinearStateParams):
+    shape: Mamba1StateShape
 
 
 @dataclass(kw_only=True, frozen=True)

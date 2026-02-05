@@ -19,7 +19,8 @@ from sglang.srt.layers.attention.mamba.causal_conv1d_triton import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from sglang.srt.layers.attention.mamba.mamba import MambaMixer2
+from sglang.srt.layers.attention.mamba.mamba import MambaMixer1, MambaMixer2
+from sglang.srt.layers.attention.mamba.mamba1_metadata import Mamba1Metadata
 from sglang.srt.layers.attention.mamba.mamba2_metadata import (
     ForwardMetadata,
     Mamba2Metadata,
@@ -1122,6 +1123,90 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
     def forward_extend(self, *args, **kwargs):
         raise NotImplementedError(
             "Mamba2AttnBackend's forward is called directly instead of through HybridLinearAttnBackend, as it supports mixed prefill and decode"
+        )
+
+
+class Mamba1AttnBackend(MambaAttnBackendBase):
+    """Attention backend wrapper for Mamba-1 mixer."""
+
+    def __init__(self, model_runner: ModelRunner):
+        super().__init__(model_runner)
+        self.conv_states_shape = (
+            model_runner.req_to_token_pool.mamba_pool.mamba_cache.conv[0].shape
+        )
+
+    def init_forward_metadata(self, forward_batch: ForwardBatch):
+        metadata = self._forward_metadata(forward_batch)
+        self.forward_metadata = Mamba1Metadata.prepare_mixed(metadata, forward_batch)
+
+    def init_forward_metadata_capture_cuda_graph(
+        self,
+        bs: int,
+        num_tokens: int,
+        req_pool_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        encoder_lens: Optional[torch.Tensor],
+        forward_mode: ForwardMode,
+        spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
+    ):
+        metadata = self._capture_metadata(bs, req_pool_indices, forward_mode, spec_info)
+        draft_token_num = spec_info.draft_token_num if spec_info is not None else 1
+        self.forward_metadata = Mamba1Metadata.prepare_decode(
+            metadata,
+            seq_lens,
+            is_target_verify=forward_mode.is_target_verify(),
+            draft_token_num=draft_token_num,
+        )
+
+    def init_forward_metadata_replay_cuda_graph(
+        self,
+        bs: int,
+        req_pool_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_sum: int,
+        encoder_lens: Optional[torch.Tensor],
+        forward_mode: ForwardMode,
+        spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
+        seq_lens_cpu: Optional[torch.Tensor],
+    ):
+        metadata = self._replay_metadata(
+            bs, req_pool_indices, forward_mode, spec_info, seq_lens_cpu
+        )
+        draft_token_num = spec_info.draft_token_num if spec_info is not None else 1
+        self.forward_metadata = Mamba1Metadata.prepare_decode(
+            metadata,
+            seq_lens,
+            is_target_verify=forward_mode.is_target_verify(),
+            draft_token_num=draft_token_num,
+        )
+
+    def forward(
+        self,
+        mixer: MambaMixer1,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        layer_id: int,
+        mup_vector: Optional[torch.Tensor] = None,
+        use_triton_causal_conv: bool = False,
+    ):
+        assert isinstance(self.forward_metadata, Mamba1Metadata)
+        layer_cache = self.req_to_token_pool.mamba_layer_cache(layer_id)
+        return mixer.forward(
+            hidden_states=hidden_states,
+            output=output,
+            layer_cache=layer_cache,
+            metadata=self.forward_metadata,
+            use_triton_causal_conv=use_triton_causal_conv,
+        )
+
+    def forward_decode(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Mamba1AttnBackend's forward is called directly instead of through HybridLinearAttnBackend."
+        )
+
+    def forward_extend(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Mamba1AttnBackend's forward is called directly instead of through HybridLinearAttnBackend."
         )
 
 

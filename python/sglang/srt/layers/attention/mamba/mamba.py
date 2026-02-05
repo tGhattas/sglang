@@ -2,8 +2,10 @@ from typing import Callable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from sglang.srt.configs.mamba_utils import (
+    Mamba1CacheParams,
     Mamba2CacheParams,
     extra_groups_for_head_shards,
 )
@@ -12,12 +14,14 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from sglang.srt.layers.attention.mamba.mamba1_metadata import Mamba1Metadata
 from sglang.srt.layers.attention.mamba.mamba2_metadata import Mamba2Metadata
 from sglang.srt.layers.attention.mamba.mixer2_rms_norm_gated import Mixer2RMSNormGated
 from sglang.srt.layers.attention.mamba.ops import (
     mamba_chunk_scan_combined,
     selective_state_update,
 )
+from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -695,3 +699,254 @@ class MambaMixer2(torch.nn.Module):
     @property
     def mamba_type(self) -> str:
         return "mamba2"
+
+
+class MambaMixer1(torch.nn.Module):
+    """Mamba-1 mixer implementation for hybrid models like Jamba."""
+
+    def __init__(
+        self,
+        cache_params: Mamba1CacheParams,
+        hidden_size: int,
+        ssm_state_size: int,
+        conv_kernel_size: int,
+        expand: int,
+        dt_rank: int,
+        use_conv_bias: bool,
+        use_bias: bool,
+        rms_norm_eps: float = 1e-6,
+        activation: str = "silu",
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        if self.tp_size != 1:
+            raise ValueError("Mamba-1 mixer currently supports tp_size=1 only.")
+
+        self.hidden_size = hidden_size
+        self.ssm_state_size = ssm_state_size
+        self.conv_kernel_size = conv_kernel_size
+        self.intermediate_size = expand * hidden_size
+        self.time_step_rank = dt_rank
+        self.activation = activation
+        if activation not in ["silu", "swish"]:
+            raise ValueError(
+                f"Unsupported activation: {activation}. Only silu/swish are supported."
+            )
+        self.act = nn.SiLU()
+
+        # Projection of input hidden states
+        self.in_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[self.intermediate_size, self.intermediate_size],
+            bias=use_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj",
+        )
+        # Selective projection for dt, B, C
+        self.x_proj = ColumnParallelLinear(
+            input_size=self.intermediate_size,
+            output_size=self.time_step_rank + self.ssm_state_size * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.x_proj",
+        )
+        # Time step projection
+        self.dt_proj = ColumnParallelLinear(
+            input_size=self.time_step_rank,
+            output_size=self.intermediate_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dt_proj",
+        )
+        # Depthwise conv1d
+        self.conv1d = nn.Conv1d(
+            in_channels=self.intermediate_size,
+            out_channels=self.intermediate_size,
+            bias=use_conv_bias,
+            kernel_size=self.conv_kernel_size,
+            groups=self.intermediate_size,
+            padding=self.conv_kernel_size - 1,
+        )
+        # SSM params
+        A = torch.arange(1, self.ssm_state_size + 1, dtype=torch.float32)[None, :]
+        A = A.expand(self.intermediate_size, -1).contiguous()
+        self.A_log = nn.Parameter(torch.log(A))
+        self.D = nn.Parameter(torch.ones(self.intermediate_size))
+
+        self.dt_layernorm = RMSNorm(self.time_step_rank, eps=rms_norm_eps)
+        self.b_layernorm = RMSNorm(self.ssm_state_size, eps=rms_norm_eps)
+        self.c_layernorm = RMSNorm(self.ssm_state_size, eps=rms_norm_eps)
+
+        self.out_proj = RowParallelLinear(
+            self.intermediate_size,
+            hidden_size,
+            bias=use_bias,
+            input_is_parallel=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
+        )
+        self.cache_params = cache_params
+
+    def _split_tokens(
+        self, hidden_states: torch.Tensor, num_prefill_tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if num_prefill_tokens == 0:
+            return hidden_states, hidden_states[:0]
+        return hidden_states[:num_prefill_tokens], hidden_states[num_prefill_tokens:]
+
+    def _apply_dt_proj(self, time_step: torch.Tensor) -> torch.Tensor:
+        return F.linear(time_step, self.dt_proj.weight, bias=None)
+
+    def forward(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        layer_cache: MambaPool.State,
+        metadata: Mamba1Metadata,
+        use_triton_causal_conv: bool = False,
+    ):
+        if metadata.is_target_verify:
+            raise NotImplementedError(
+                "Mamba-1 speculative decoding is not supported yet."
+            )
+
+        state_indices_tensor = metadata.mamba_cache_indices
+        conv_state = layer_cache.conv[0]
+        ssm_state = layer_cache.temporal
+        query_start_loc = metadata.query_start_loc
+
+        projected_states, _ = self.in_proj(hidden_states)
+        x, gate = torch.split(
+            projected_states, [self.intermediate_size, self.intermediate_size], dim=-1
+        )
+
+        num_prefill_tokens = metadata.num_prefill_tokens
+        num_decode_tokens = hidden_states.shape[0] - num_prefill_tokens
+        preallocated_ssm_out = torch.empty(
+            (hidden_states.shape[0], self.intermediate_size),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+
+        if num_prefill_tokens > 0:
+            x_p, _ = self._split_tokens(x, num_prefill_tokens)
+            gate_p, _ = self._split_tokens(gate, num_prefill_tokens)
+            cache_indices_p = state_indices_tensor[: metadata.num_prefills]
+            query_start_loc_p = query_start_loc[: metadata.num_prefills + 1]
+            x_p_t = x_p.transpose(0, 1)
+            x_p_conv = causal_conv1d_fn(
+                x_p_t,
+                conv_weights,
+                self.conv1d.bias,
+                activation=self.activation,
+                conv_states=conv_state,
+                has_initial_state=metadata.has_initial_states,
+                cache_indices=cache_indices_p,
+                query_start_loc=query_start_loc_p,
+                seq_lens_cpu=metadata.extend_seq_lens_cpu,
+            ).transpose(0, 1)[:num_prefill_tokens]
+
+            ssm_params, _ = self.x_proj(x_p_conv)
+            time_step, B, C = torch.split(
+                ssm_params,
+                [self.time_step_rank, self.ssm_state_size, self.ssm_state_size],
+                dim=-1,
+            )
+            time_step = self.dt_layernorm(time_step)
+            B = self.b_layernorm(B)
+            C = self.c_layernorm(C)
+            dt = self._apply_dt_proj(time_step)
+
+            A = -torch.exp(self.A_log.float())
+            A_d = A[None, :, :]
+            D_d = self.D[None, :]
+            dt_bias = self.dt_proj.bias
+            dt_bias = dt_bias[None, :] if dt_bias is not None else None
+
+            for seq_idx in range(metadata.num_prefills):
+                start = int(query_start_loc_p[seq_idx].item())
+                end = int(query_start_loc_p[seq_idx + 1].item())
+                if end <= start:
+                    continue
+                out_slice = preallocated_ssm_out[start:end].view(
+                    1, end - start, 1, self.intermediate_size
+                )
+                selective_state_update(
+                    ssm_state,
+                    x_p_conv[start:end].view(
+                        1, end - start, 1, self.intermediate_size
+                    ),
+                    dt[start:end].view(1, end - start, 1, self.intermediate_size),
+                    A_d,
+                    B[start:end].view(1, end - start, 1, self.ssm_state_size),
+                    C[start:end].view(1, end - start, 1, self.ssm_state_size),
+                    D_d,
+                    z=gate_p[start:end].view(
+                        1, end - start, 1, self.intermediate_size
+                    ),
+                    dt_bias=dt_bias,
+                    dt_softplus=True,
+                    state_batch_indices=cache_indices_p[seq_idx : seq_idx + 1],
+                    out=out_slice,
+                )
+
+        if num_decode_tokens > 0:
+            x_d = x[num_prefill_tokens:]
+            gate_d = gate[num_prefill_tokens:]
+            cache_indices_d = state_indices_tensor[metadata.num_prefills :]
+            x_d_conv = causal_conv1d_update(
+                x_d,
+                conv_state,
+                conv_weights,
+                self.conv1d.bias,
+                self.activation,
+                conv_state_indices=cache_indices_d,
+            )
+
+            ssm_params, _ = self.x_proj(x_d_conv)
+            time_step, B, C = torch.split(
+                ssm_params,
+                [self.time_step_rank, self.ssm_state_size, self.ssm_state_size],
+                dim=-1,
+            )
+            time_step = self.dt_layernorm(time_step)
+            B = self.b_layernorm(B)
+            C = self.c_layernorm(C)
+            dt = self._apply_dt_proj(time_step)
+
+            A = -torch.exp(self.A_log.float())
+            A_d = A[None, :, :]
+            D_d = self.D[None, :]
+            dt_bias = self.dt_proj.bias
+            dt_bias = dt_bias[None, :] if dt_bias is not None else None
+
+            out_slice = preallocated_ssm_out[num_prefill_tokens:].view(
+                -1, 1, 1, self.intermediate_size
+            )
+            selective_state_update(
+                ssm_state,
+                x_d_conv.view(-1, 1, 1, self.intermediate_size),
+                dt.view(-1, 1, 1, self.intermediate_size),
+                A_d,
+                B.view(-1, 1, 1, self.ssm_state_size),
+                C.view(-1, 1, 1, self.ssm_state_size),
+                D_d,
+                z=gate_d.view(-1, 1, 1, self.intermediate_size),
+                dt_bias=dt_bias,
+                dt_softplus=True,
+                state_batch_indices=cache_indices_d,
+                out=out_slice,
+            )
+
+        output[: hidden_states.shape[0]], _ = self.out_proj(preallocated_ssm_out)
+
+    @property
+    def mamba_type(self) -> str:
+        return "mamba1"

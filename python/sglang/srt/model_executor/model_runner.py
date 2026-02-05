@@ -34,6 +34,7 @@ from sglang.srt.configs import (
     FalconH1Config,
     JetNemotronConfig,
     JetVLMConfig,
+    JambaConfig,
     KimiLinearConfig,
     Lfm2Config,
     NemotronH_Nano_VL_V2_Config,
@@ -1504,6 +1505,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return None
 
     @property
+    def mamba1_config(self):
+        config = self.model_config.hf_config
+        if isinstance(config, JambaConfig):
+            return config
+        return None
+
+    @property
     def mamba2_config(self):
         config = self.model_config.hf_config
         if isinstance(config, NemotronHConfig) and self.is_draft_worker:
@@ -1535,7 +1543,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
     @property
     def mambaish_config(self):
-        return self.mamba2_config or self.hybrid_gdn_config or self.kimi_linear_config
+        return (
+            self.mamba1_config
+            or self.mamba2_config
+            or self.hybrid_gdn_config
+            or self.kimi_linear_config
+        )
 
     def can_run_piecewise_cuda_graph(self):
         if self.is_draft_worker:

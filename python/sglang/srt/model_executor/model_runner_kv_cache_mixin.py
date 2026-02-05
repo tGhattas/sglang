@@ -152,6 +152,10 @@ class ModelRunnerKVCacheMixin:
         config = self.mambaish_config
         server_args = self.server_args
         assert config is not None
+        mamba_cache_params = getattr(config, "mamba_cache_params", None) or getattr(
+            config, "mamba2_cache_params", None
+        )
+        assert mamba_cache_params is not None
 
         # reserve the memory for the intermediate mamba states used for spec dec
         if not self.spec_algorithm.is_none():
@@ -162,7 +166,7 @@ class ModelRunnerKVCacheMixin:
                 self.dp_size if server_args.enable_dp_attention else 1
             )
             mamba_state_intermediate_size = (
-                config.mamba2_cache_params.mamba_cache_per_req
+                mamba_cache_params.mamba_cache_per_req
                 * max_running_requests
                 * server_args.speculative_num_draft_tokens
             )
@@ -184,7 +188,7 @@ class ModelRunnerKVCacheMixin:
                 server_args.dp_size if server_args.enable_dp_attention else 1
             )
         else:
-            assert config.mamba2_cache_params.mamba_cache_per_req > 0
+            assert mamba_cache_params.mamba_cache_per_req > 0
 
             # allocate the memory based on the ratio between mamba state memory vs. full kv cache memory
             # solve the equations:
@@ -198,12 +202,12 @@ class ModelRunnerKVCacheMixin:
             # calculate the max_mamba_cache_size based on the given total mamba memory
             server_args.max_mamba_cache_size = int(
                 (mamba_state_memory_raw * (1 << 30))
-                // config.mamba2_cache_params.mamba_cache_per_req
+                // mamba_cache_params.mamba_cache_per_req
             )
 
         mamba_state_memory = (
             server_args.max_mamba_cache_size
-            * config.mamba2_cache_params.mamba_cache_per_req
+            * mamba_cache_params.mamba_cache_per_req
             / (1 << 30)
         )
         return total_rest_memory - mamba_state_memory
@@ -395,13 +399,17 @@ class ModelRunnerKVCacheMixin:
                 # if max_num_reqs <= 32, we pre-allocate 2x requests
                 pre_alloc_size = max_num_reqs * 2 if max_num_reqs <= 32 else 0
                 if config := self.mambaish_config:
+                    mamba_cache_params = getattr(
+                        config, "mamba_cache_params", None
+                    ) or getattr(config, "mamba2_cache_params", None)
+                    assert mamba_cache_params is not None
                     self.req_to_token_pool = HybridMambaDecodeReqToTokenPool(
                         size=max_num_reqs,
                         max_context_len=self.model_config.context_len
                         + extra_max_context_len,
                         device=self.device,
                         enable_memory_saver=self.server_args.enable_memory_saver,
-                        cache_params=config.mamba2_cache_params,
+                        cache_params=mamba_cache_params,
                         speculative_num_draft_tokens=self.server_args.speculative_num_draft_tokens,
                         enable_mamba_extra_buffer=self.server_args.enable_mamba_extra_buffer(),
                         pre_alloc_size=pre_alloc_size,
@@ -416,6 +424,10 @@ class ModelRunnerKVCacheMixin:
                         pre_alloc_size=pre_alloc_size,
                     )
             elif config := self.mambaish_config:
+                mamba_cache_params = getattr(config, "mamba_cache_params", None) or getattr(
+                    config, "mamba2_cache_params", None
+                )
+                assert mamba_cache_params is not None
                 self.req_to_token_pool = HybridReqToTokenPool(
                     size=max_num_reqs,
                     mamba_size=self.server_args.max_mamba_cache_size,
@@ -424,7 +436,7 @@ class ModelRunnerKVCacheMixin:
                     + extra_max_context_len,
                     device=self.device,
                     enable_memory_saver=self.server_args.enable_memory_saver,
-                    cache_params=config.mamba2_cache_params,
+                    cache_params=mamba_cache_params,
                     enable_mamba_extra_buffer=self.server_args.enable_mamba_extra_buffer(),
                     speculative_num_draft_tokens=self.server_args.speculative_num_draft_tokens,
                 )
