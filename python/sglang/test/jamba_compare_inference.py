@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import Iterable, List, Tuple
+from typing import Iterable, List
 
 import requests
 import torch
@@ -165,7 +165,9 @@ def main(argv: Iterable[str]) -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:30099")
     parser.add_argument("--mem-fraction-static", type=float, default=0.7)
     parser.add_argument("--disable-radix-cache", action="store_true", default=True)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
     parser.add_argument("--temperature-seq", default="0.0,0.2,0.5,0.7,1.0")
     parser.add_argument("--top-p-seq", default="1.0,0.95,0.9,0.85,0.8")
     args = parser.parse_args(list(argv))

@@ -880,17 +880,13 @@ class MambaMixer1(torch.nn.Module):
                 )
                 selective_state_update(
                     ssm_state,
-                    x_p_conv[start:end].view(
-                        1, end - start, 1, self.intermediate_size
-                    ),
+                    x_p_conv[start:end].view(1, end - start, 1, self.intermediate_size),
                     dt[start:end].view(1, end - start, 1, self.intermediate_size),
                     A_d,
                     B[start:end].view(1, end - start, 1, self.ssm_state_size),
                     C[start:end].view(1, end - start, 1, self.ssm_state_size),
                     D_d,
-                    z=gate_p[start:end].view(
-                        1, end - start, 1, self.intermediate_size
-                    ),
+                    z=gate_p[start:end].view(1, end - start, 1, self.intermediate_size),
                     dt_bias=dt_bias,
                     dt_softplus=True,
                     state_batch_indices=cache_indices_p[seq_idx : seq_idx + 1],

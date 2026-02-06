@@ -16,8 +16,8 @@ from typing import Optional
 
 import torch
 
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.layers.attention.mamba.mamba2_metadata import ForwardMetadata
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
 
 @dataclass(kw_only=True)

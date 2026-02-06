@@ -23,6 +23,11 @@ from torch import nn
 
 from sglang.srt.configs.jamba import JambaConfig
 from sglang.srt.distributed import get_pp_group
+from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
+    HybridLinearAttnBackend,
+    Mamba1AttnBackend,
+)
+from sglang.srt.layers.attention.mamba.mamba import MambaMixer1
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
@@ -43,11 +48,6 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTe
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import add_prefix, make_layers
-from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
-    HybridLinearAttnBackend,
-    Mamba1AttnBackend,
-)
-from sglang.srt.layers.attention.mamba.mamba import MambaMixer1
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,7 @@ class JambaMLP(nn.Module):
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. Only silu is supported."
             )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate, _ = self.gate_proj(x)
         up, _ = self.up_proj(x)
@@ -152,9 +153,9 @@ class JambaSparseMoeBlock(nn.Module):
             if top_x.numel() == 0:
                 continue
             current_state = hidden_states[top_x]
-            current_hidden_states = expert_layer(current_state) * routing_weights[
-                top_x, idx, None
-            ]
+            current_hidden_states = (
+                expert_layer(current_state) * routing_weights[top_x, idx, None]
+            )
             final_hidden_states.index_add_(0, top_x, current_hidden_states)
 
         final_hidden_states = final_hidden_states.view(batch_size, seq_len, hidden_dim)
@@ -441,6 +442,7 @@ class JambaModel(nn.Module):
             hidden_states, _ = self.norm(hidden_states, residual)
             return hidden_states
 
+
 class JambaForCausalLM(nn.Module):
     default_bitsandbytes_target_modules = [
         ".gate_proj.",
@@ -468,7 +470,9 @@ class JambaForCausalLM(nn.Module):
         self.pp_group = get_pp_group()
         self.config = config
         self.quant_config = quant_config
-        self.model = JambaModel(config, quant_config=quant_config, prefix=add_prefix("model", prefix))
+        self.model = JambaModel(
+            config, quant_config=quant_config, prefix=add_prefix("model", prefix)
+        )
         if self.config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:

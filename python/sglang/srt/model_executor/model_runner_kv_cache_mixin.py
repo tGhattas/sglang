@@ -424,9 +424,9 @@ class ModelRunnerKVCacheMixin:
                         pre_alloc_size=pre_alloc_size,
                     )
             elif config := self.mambaish_config:
-                mamba_cache_params = getattr(config, "mamba_cache_params", None) or getattr(
-                    config, "mamba2_cache_params", None
-                )
+                mamba_cache_params = getattr(
+                    config, "mamba_cache_params", None
+                ) or getattr(config, "mamba2_cache_params", None)
                 assert mamba_cache_params is not None
                 self.req_to_token_pool = HybridReqToTokenPool(
                     size=max_num_reqs,

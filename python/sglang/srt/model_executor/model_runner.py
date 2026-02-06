@@ -32,9 +32,9 @@ from torch import nn
 
 from sglang.srt.configs import (
     FalconH1Config,
+    JambaConfig,
     JetNemotronConfig,
     JetVLMConfig,
-    JambaConfig,
     KimiLinearConfig,
     Lfm2Config,
     NemotronH_Nano_VL_V2_Config,

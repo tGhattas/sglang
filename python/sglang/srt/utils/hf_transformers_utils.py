@@ -52,6 +52,7 @@ from sglang.srt.configs import (
     DotsVLMConfig,
     ExaoneConfig,
     FalconH1Config,
+    JambaConfig,
     JetNemotronConfig,
     JetVLMConfig,
     KimiK25Config,
@@ -63,7 +64,6 @@ from sglang.srt.configs import (
     NemotronHConfig,
     Olmo3Config,
     Qwen3NextConfig,
-    JambaConfig,
     Step3p5Config,
     Step3VLConfig,
 )
