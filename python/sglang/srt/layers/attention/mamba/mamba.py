@@ -36,6 +36,8 @@ from sglang.srt.model_loader.weight_utils import (
 from sglang.srt.utils import is_cpu, is_cuda, is_npu, set_weight_attrs
 
 if is_cuda():
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+
     from sglang.srt.layers.attention.mamba.causal_conv1d import (
         causal_conv1d_fn,
         causal_conv1d_update,
@@ -865,33 +867,44 @@ class MambaMixer1(torch.nn.Module):
             dt = self._apply_dt_proj(time_step)
 
             A = -torch.exp(self.A_log.float())
-            A_d = A[None, :, :]
-            D_d = self.D[None, :]
-            dt_bias = self.dt_proj.bias
-            dt_bias = dt_bias[None, :] if dt_bias is not None else None
+            dt_bias_float = self.dt_proj.bias
+            dt_bias_float = dt_bias_float.float() if dt_bias_float is not None else None
 
             for seq_idx in range(metadata.num_prefills):
                 start = int(query_start_loc_p[seq_idx].item())
                 end = int(query_start_loc_p[seq_idx + 1].item())
                 if end <= start:
                     continue
-                out_slice = preallocated_ssm_out[start:end].view(
-                    1, end - start, 1, self.intermediate_size
+                # Reshape from [seq_len, dim] to [1, dim, seq_len] for selective_scan_fn.
+                # Convert all inputs to float32: the selective_scan CUDA kernel does not
+                # handle mixed dtypes (bfloat16 inputs + float32 A/D/dt_bias) and will
+                # produce CUDA misaligned address errors.
+                dtype_in = x_p_conv.dtype
+                u = x_p_conv[start:end].transpose(0, 1).unsqueeze(0).float()
+                delta = dt[start:end].transpose(0, 1).unsqueeze(0).float()
+                B_seq = B[start:end].transpose(0, 1).unsqueeze(0).float()
+                C_seq = C[start:end].transpose(0, 1).unsqueeze(0).float()
+                z = gate_p[start:end].transpose(0, 1).unsqueeze(0).float()
+
+                scan_output, ssm_state_out = selective_scan_fn(
+                    u,
+                    delta,
+                    A,
+                    B_seq,
+                    C_seq,
+                    self.D.float(),
+                    z,
+                    dt_bias_float,
+                    delta_softplus=True,
+                    return_last_state=True,
                 )
-                selective_state_update(
-                    ssm_state,
-                    x_p_conv[start:end].view(1, end - start, 1, self.intermediate_size),
-                    dt[start:end].view(1, end - start, 1, self.intermediate_size),
-                    A_d,
-                    B[start:end].view(1, end - start, 1, self.ssm_state_size),
-                    C[start:end].view(1, end - start, 1, self.ssm_state_size),
-                    D_d,
-                    z=gate_p[start:end].view(1, end - start, 1, self.intermediate_size),
-                    dt_bias=dt_bias,
-                    dt_softplus=True,
-                    state_batch_indices=cache_indices_p[seq_idx : seq_idx + 1],
-                    out=out_slice,
+                # scan_output: [1, intermediate_size, seq_len] -> [seq_len, intermediate_size]
+                preallocated_ssm_out[start:end] = (
+                    scan_output.squeeze(0).transpose(0, 1).to(dtype_in)
                 )
+                # Write final SSM state to cache (already float32 and contiguous now).
+                cache_idx = int(cache_indices_p[seq_idx].item())
+                ssm_state[cache_idx] = ssm_state_out.contiguous()
 
         if num_decode_tokens > 0:
             x_d = x[num_prefill_tokens:]

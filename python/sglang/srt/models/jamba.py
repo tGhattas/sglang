@@ -405,9 +405,9 @@ class JambaModel(nn.Module):
         )
 
         if self.pp_group.is_last_rank:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
-            self.norm = PPMissingLayer(return_tuple=True)
+            self.final_layernorm = PPMissingLayer(return_tuple=True)
 
     def forward(
         self,
@@ -439,7 +439,7 @@ class JambaModel(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         else:
-            hidden_states, _ = self.norm(hidden_states, residual)
+            hidden_states, _ = self.final_layernorm(hidden_states, residual)
             return hidden_states
 
 
@@ -519,7 +519,14 @@ class JambaForCausalLM(nn.Module):
 
     def load_weights(self, weights):
         params_dict = dict(self.named_parameters())
+        loaded_params = set()
+        weight_count = 0
         for name, loaded_weight in weights:
+            weight_count += 1
+            if weight_count <= 5 or "layers.0." in name:
+                logger.warning(
+                    f"Jamba load_weights DEBUG: processing weight '{name}' shape={loaded_weight.shape}"
+                )
             layer_id = get_layer_id(name)
             if (
                 layer_id is not None
@@ -539,20 +546,45 @@ class JambaForCausalLM(nn.Module):
                     continue
                 name = name.replace(weight_name, param_name)
                 if name not in params_dict:
+                    logger.warning(
+                        f"Jamba load_weights: stacked param '{name}' "
+                        f"(from '{weight_name}') not found in model params"
+                    )
                     break
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 stacked_loaded = True
                 break
             if stacked_loaded:
                 continue
 
             if name not in params_dict:
+                logger.warning(
+                    f"Jamba load_weights: weight '{name}' not found in model "
+                    f"params - this weight will be SKIPPED"
+                )
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+
+        # Log unloaded parameters
+        logger.warning(
+            f"Jamba load_weights DEBUG: total weights iterated={weight_count}, "
+            f"total model params={len(params_dict)}, loaded={len(loaded_params)}"
+        )
+        logger.warning(
+            f"Jamba load_weights DEBUG: loaded param names={sorted(loaded_params)[:10]}..."
+        )
+        unloaded = set(params_dict.keys()) - loaded_params
+        if unloaded:
+            logger.warning(
+                f"Jamba load_weights: {len(unloaded)} parameters were NOT "
+                f"loaded and retain their initial values: {sorted(unloaded)}"
+            )
 
 
 EntryClass = JambaForCausalLM
